@@ -1,0 +1,2182 @@
+--[[
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║                     ZAKZAR V6 — PREMIUM EDITION                  ║
+    ║               MMO RPG Utility & Interface Suite                  ║
+    ║             Created by ZAKZAR Studio © 2024                      ║
+    ╚══════════════════════════════════════════════════════════════════╝
+    
+    📚 [ОБУЧАЮЩИЙ РАЗДЕЛ: АРХИТЕКТУРА СКРИПТА V6]
+    Данный LocalScript представляет собой клиентский интерфейс и утилитарный
+    комплекс для MMO RPG на платформе Roblox (для собственного плейса разработчика).
+    Все визуальные элементы скомпонованы без внешних ассетов (rbxassetid) исключительно
+    из стандартных UI-примитивов (Frame, UICorner, UIStroke).
+    
+    Ключевые архитектурные решения и исправления V6:
+    1. Переменная noclipOrigTransparency вынесена в верхнюю область видимости (Top Scope)
+       до объявления колбэков переключателей, что устраняет ошибку обращения к nil в V5.
+    2. Полный жизненный цикл при возрождении (CharacterAdded): очистка сохраненных
+       прозрачностей коллизий NoClip и перепривязка/очистка объектов ESP.
+    3. Отказоустойчивый механизм Bring Mobs: защищённый вызов pcall со снятием Anchored
+       при сетевых коллизиях физики.
+    4. Безопасный запуск ProximityPrompt в Auto Loot: вызов fireproximityprompt с
+       полноценным фоллбэком через InputHoldBegin / task.wait / InputHoldEnd.
+    5. Чистый UI без эмодзи (строго текстовые бейджи и нарисованные векторные иконки).
+--]]
+
+-- ==============================================================================
+-- 1. СЛУЖБЫ ROBLOX (SERVICES)
+-- ==============================================================================
+-- 📚 Получение системных служб движка через GetService — единственный безопасный подход.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local StarterGui = game:GetService("StarterGui")
+local CoreGui = game:GetService("CoreGui")
+local TextChatService = game:GetService("TextChatService")
+local Stats = game:GetService("Stats")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
+
+-- ==============================================================================
+-- 2. ЦВЕТОВАЯ ПАЛИТРА И ДИЗАЙН-СИСТЕМА (DESIGN TOKENS)
+-- ==============================================================================
+-- 📚 Централизованные дизайн-токены для обеспечения единого визуального стиля.
+local colors = {
+    bgDark   = Color3.fromRGB(16, 16, 24),    -- Самый темный фон (внешние панели, подложки)
+    bg       = Color3.fromRGB(22, 22, 32),    -- Основной фон главной панели
+    surface  = Color3.fromRGB(30, 30, 42),    -- Карточки секций и элементы списков
+    sidebar  = Color3.fromRGB(18, 18, 28),    -- Боковая панель переключения вкладок
+    accent   = Color3.fromRGB(75, 75, 255),   -- Фирменный сине-фиолетовый акцент
+    green    = Color3.fromRGB(50, 200, 120),  -- Индикатор успешности / статус
+    orange   = Color3.fromRGB(230, 150, 50),  -- Предупреждения / альтернативные режимы
+    red      = Color3.fromRGB(220, 70, 70),   -- Деструктивные действия / ESP врагов
+    yellow   = Color3.fromRGB(230, 210, 60),  -- ESP игроков / нейтральные маркеры
+    text     = Color3.fromRGB(195, 195, 215), -- Стандартный цвет текста
+    bright   = Color3.fromRGB(235, 235, 255), -- Яркий текст (заголовки, активные элементы)
+    dim      = Color3.fromRGB(75, 75, 100),   -- Приглушенный текст (подзаголовки, описания)
+    off      = Color3.fromRGB(40, 40, 55),    -- Цвет выключенного переключателя (track)
+    track    = Color3.fromRGB(34, 34, 48),    -- Базовая подложка слайдеров
+    bar      = Color3.fromRGB(20, 20, 30),    -- Фон панели FPS/Ping
+    panel    = Color3.fromRGB(26, 26, 38),    -- Промежуточный фон контейнеров
+    stroke   = Color3.fromRGB(45, 45, 65)     -- Цвет обводки границ карточек
+}
+
+local fonts = {
+    regular = Enum.Font.Gotham,
+    medium  = Enum.Font.GothamMedium,
+    bold    = Enum.Font.GothamBold
+}
+
+-- ==============================================================================
+-- 3. СОСТОЯНИЕ СКРИПТА (STATE STORE)
+-- ==============================================================================
+-- 📚 Централизованное состояние для мгновенной синхронизации логики и UI.
+local state = {
+    -- Вкладка 1: Movement
+    speedHack = false,
+    speedValue = 16,
+    defaultWalkSpeed = 16,
+    
+    infiniteJump = false,
+    infiniteJumpPower = 50,
+    
+    flyKnocked = false,
+    flyHack = false,
+    flySpeed = 24,
+    
+    noClip = false,
+    noFallDmg = false,
+    
+    -- Вкладка 2: Combat
+    autoFarm = false,
+    pathfindBreaker = false,
+    bringMobs = false,
+    bringDistance = 5,
+    bringHeight = 0,
+    bringRotation = 0,
+    
+    -- Вкладка 3: Visuals
+    fullbright = false,
+    brightnessVal = 2,
+    noShadows = false,
+    changeTimeOfDay = false,
+    timeOfDayVal = 14,
+    unlockZoom = false,
+    noAnimatedSea = false,
+    noFog = false,
+    clearSky = false,
+    noBlur = false,
+    noBlind = false,
+    noSanityVFX = false,
+    barPercentages = false,
+    
+    -- Вкладка 4: Loot & ESP
+    autoLoot = false,
+    lootDistance = 30,
+    playerESP = false,
+    espShowHealth = true,
+    espShowDist = true,
+    mobsESP = false,
+    mobsHealthBar = true,
+    mobsBoxes = true,
+    mobsESPDistance = 100,
+    chatLogger = false,
+    logOwnMessages = false,
+    
+    -- Системные оригинальные значения для восстановления
+    originalLighting = {
+        Ambient = Lighting.Ambient,
+        OutdoorAmbient = Lighting.OutdoorAmbient,
+        Brightness = Lighting.Brightness,
+        ClockTime = Lighting.ClockTime,
+        ExposureCompensation = Lighting.ExposureCompensation,
+        FogEnd = Lighting.FogEnd,
+        GlobalShadows = Lighting.GlobalShadows
+    }
+}
+
+-- Таблица подключений для предотвращения утечек памяти
+local connections = {}
+
+-- 📚 [CRITICAL FIX V6 #1]: Переменная noclipOrigTransparency объявлена на верхнем уровне
+-- до всех функций и колбэков переключателей, что гарантирует её видимость во всём скрипте.
+local noclipOrigTransparency = {} -- { [BasePart] = number }
+
+-- Хранилище объектов подсветки ESP
+local espStorage = {} -- { [Instance] = { highlight = Highlight, billboard = BillboardGui, isPlayer = boolean } }
+
+-- ==============================================================================
+-- 4. ИНИЦИАЛИЗАЦИЯ ИНТЕРФЕЙСА (UI ROOT)
+-- ==============================================================================
+-- 📚 Безопасное определение родительского контейнера для GUI (PlayerGui или CoreGui)
+local guiParent = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+if not guiParent then
+    pcall(function()
+        guiParent = CoreGui
+    end)
+    if not guiParent then
+        guiParent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+end
+
+-- Очистка предыдущих версий интерфейса при повторном запуске скрипта
+if guiParent:FindFirstChild("ZAKZAR_V6_ROOT") then
+    guiParent["ZAKZAR_V6_ROOT"]:Destroy()
+end
+if guiParent:FindFirstChild("ZAKZAR_V5_ROOT") then
+    guiParent["ZAKZAR_V5_ROOT"]:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "ZAKZAR_V6_ROOT"
+screenGui.ResetOnSpawn = false
+screenGui.DisplayOrder = 999
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = guiParent
+
+-- ==============================================================================
+-- 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И КОМПОНЕНТЫ
+-- ==============================================================================
+-- 📚 Функция быстрой генерации экземпляров. Свойства присваиваются ДО родителя.
+local function create(className, properties)
+    local inst = Instance.new(className)
+    local parent = nil
+    for prop, val in pairs(properties) do
+        if prop == "Parent" then
+            parent = val
+        else
+            inst[prop] = val
+        end
+    end
+    if parent then
+        inst.Parent = parent
+    end
+    return inst
+end
+
+-- 📚 Функция универсальной плавной анимации свойств (Tween)
+local function tween(inst, duration, props, style, direction)
+    style = style or Enum.EasingStyle.Quad
+    direction = direction or Enum.EasingDirection.Out
+    local t = TweenService:Create(inst, TweenInfo.new(duration, style, direction), props)
+    t:Play()
+    return t
+end
+
+-- 📚 Пользовательский drag-and-drop механизм.
+-- ВАЖНО: Привязывается ИСКЛЮЧИТЕЛЬНО к верхней панели (TopBar), чтобы клики по кнопкам не сбивали позицию!
+local function makeDraggable(targetFrame, handleFrame)
+    local dragging = false
+    local dragInput, dragStart, startPos
+
+    handleFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = targetFrame.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    handleFrame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            targetFrame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+-- ==============================================================================
+-- 6. СИСТЕМА УВЕДОМЛЕНИЙ (TOAST NOTIFICATIONS)
+-- ==============================================================================
+-- Контейнер для всплывающих уведомлений в правом нижнем углу экрана
+local notifyContainer = create("Frame", {
+    Name = "NotificationContainer",
+    Size = UDim2.new(0, 260, 0, 300),
+    Position = UDim2.new(1, -275, 1, -315),
+    BackgroundTransparency = 1,
+    Parent = screenGui
+})
+
+local notifyLayout = create("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    VerticalAlignment = Enum.VerticalAlignment.Bottom,
+    Padding = UDim.new(0, 6),
+    Parent = notifyContainer
+})
+
+local function notify(title, message, duration, badgeColor)
+    duration = duration or 3
+    badgeColor = badgeColor or colors.accent
+
+    local toast = create("Frame", {
+        Name = "Toast",
+        Size = UDim2.new(1, 0, 0, 52),
+        BackgroundColor3 = colors.bgDark,
+        BackgroundTransparency = 0.1,
+        ClipsDescendants = true,
+        Parent = notifyContainer
+    })
+    create("UICorner", { CornerRadius = UDim.new(0, 8), Parent = toast })
+    create("UIStroke", { Color = colors.stroke, Thickness = 1, Parent = toast })
+
+    -- Цветная полоска слева
+    create("Frame", {
+        Size = UDim2.new(0, 4, 1, 0),
+        BackgroundColor3 = badgeColor,
+        BorderSizePixel = 0,
+        Parent = toast
+    })
+
+    create("TextLabel", {
+        Text = title:upper(),
+        Font = fonts.bold,
+        TextSize = 11,
+        TextColor3 = badgeColor,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Position = UDim2.new(0, 12, 0, 6),
+        Size = UDim2.new(1, -20, 0, 16),
+        BackgroundTransparency = 1,
+        Parent = toast
+    })
+
+    create("TextLabel", {
+        Text = message,
+        Font = fonts.regular,
+        TextSize = 11,
+        TextColor3 = colors.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Position = UDim2.new(0, 12, 0, 24),
+        Size = UDim2.new(1, -20, 0, 22),
+        TextWrapped = true,
+        BackgroundTransparency = 1,
+        Parent = toast
+    })
+
+    -- Анимация появления
+    toast.Position = UDim2.new(1, 50, 0, 0)
+    tween(toast, 0.3, { Position = UDim2.new(0, 0, 0, 0) })
+
+    task.delay(duration, function()
+        if toast and toast.Parent then
+            local hideTween = tween(toast, 0.3, { Position = UDim2.new(1, 50, 0, 0), BackgroundTransparency = 1 })
+            hideTween.Completed:Connect(function()
+                toast:Destroy()
+            end)
+        end
+    end)
+end
+
+-- ==============================================================================
+-- 7. ПЛАВАЮЩИЕ ИНФОРМАЦИОННЫЕ ПАНЕЛИ (FPS / PING & PLAYER DETECTOR)
+-- ==============================================================================
+-- 📚 Плавающий бар производительности вверху экрана
+local fpsBar = create("Frame", {
+    Name = "FPSPingBar",
+    Size = UDim2.new(0, 260, 0, 28),
+    Position = UDim2.new(0.5, -130, 0, 10),
+    BackgroundColor3 = colors.bar,
+    BorderSizePixel = 0,
+    Parent = screenGui
+})
+create("UICorner", { CornerRadius = UDim.new(0, 8), Parent = fpsBar })
+create("UIStroke", { Color = colors.stroke, Thickness = 1, Parent = fpsBar })
+makeDraggable(fpsBar, fpsBar)
+
+local fpsLabel = create("TextLabel", {
+    Size = UDim2.new(1, 0, 1, 0),
+    BackgroundTransparency = 1,
+    Font = fonts.medium,
+    TextSize = 11,
+    TextColor3 = colors.text,
+    Text = "FPS: 60  |  PING: 45ms  |  00:00:00",
+    Parent = fpsBar
+})
+
+-- Обновление FPS и Ping
+local frameCount = 0
+local lastFpsUpdate = os.clock()
+RunService.RenderStepped:Connect(function()
+    frameCount = frameCount + 1
+    local now = os.clock()
+    if now - lastFpsUpdate >= 0.5 then
+        local currentFPS = math.floor(frameCount / (now - lastFpsUpdate))
+        frameCount = 0
+        lastFpsUpdate = now
+
+        local ping = 0
+        pcall(function()
+            ping = math.floor(LocalPlayer:GetNetworkPing() * 1000)
+        end)
+        local timeStr = os.date("%H:%M:%S")
+
+        fpsLabel.Text = string.format("FPS: %d  |  PING: %dms  |  %s", currentFPS, ping, timeStr)
+    end
+end)
+
+-- 📚 Панель детектора ближайших игроков (Player Detector Panel)
+local detectorPanel = create("Frame", {
+    Name = "PlayerDetectorPanel",
+    Size = UDim2.new(0, 200, 0, 240),
+    Position = UDim2.new(1, -215, 0, 50),
+    BackgroundColor3 = colors.panel,
+    BorderSizePixel = 0,
+    Parent = screenGui
+})
+create("UICorner", { CornerRadius = UDim.new(0, 10), Parent = detectorPanel })
+create("UIStroke", { Color = colors.stroke, Thickness = 1, Parent = detectorPanel })
+
+local detectorHeader = create("Frame", {
+    Size = UDim2.new(1, 0, 0, 32),
+    BackgroundColor3 = colors.bgDark,
+    BorderSizePixel = 0,
+    Parent = detectorPanel
+})
+create("UICorner", { CornerRadius = UDim.new(0, 10), Parent = detectorHeader })
+-- Заплатка для нижних углов заголовка
+create("Frame", {
+    Size = UDim2.new(1, 0, 0, 10),
+    Position = UDim2.new(0, 0, 1, -10),
+    BackgroundColor3 = colors.bgDark,
+    BorderSizePixel = 0,
+    Parent = detectorHeader
+})
+
+create("TextLabel", {
+    Text = "RADAR / PLAYERS",
+    Font = fonts.bold,
+    TextSize = 11,
+    TextColor3 = colors.bright,
+    Position = UDim2.new(0, 10, 0, 0),
+    Size = UDim2.new(1, -20, 1, 0),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    BackgroundTransparency = 1,
+    Parent = detectorHeader
+})
+makeDraggable(detectorPanel, detectorHeader)
+
+local detectorScroll = create("ScrollingFrame", {
+    Size = UDim2.new(1, -12, 1, -40),
+    Position = UDim2.new(0, 6, 0, 36),
+    BackgroundTransparency = 1,
+    ScrollBarThickness = 2,
+    ScrollBarImageColor3 = colors.dim,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    Parent = detectorPanel
+})
+create("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 4),
+    Parent = detectorScroll
+})
+
+-- Логика радара игроков
+local notifiedPlayers = {}
+task.spawn(function()
+    while task.wait(1) do
+        for _, child in pairs(detectorScroll:GetChildren()) do
+            if child:IsA("Frame") then
+                child:Destroy()
+            end
+        end
+
+        local myChar = LocalPlayer.Character
+        local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+                local otherHRP = plr.Character.HumanoidRootPart
+                local dist = myHRP and math.floor((otherHRP.Position - myHRP.Position).Magnitude) or 9999
+
+                local row = create("Frame", {
+                    Size = UDim2.new(1, 0, 0, 24),
+                    BackgroundColor3 = colors.surface,
+                    Parent = detectorScroll
+                })
+                create("UICorner", { CornerRadius = UDim.new(0, 6), Parent = row })
+
+                create("TextLabel", {
+                    Text = plr.DisplayName,
+                    Font = fonts.medium,
+                    TextSize = 10,
+                    TextColor3 = colors.bright,
+                    Position = UDim2.new(0, 6, 0, 0),
+                    Size = UDim2.new(0.65, 0, 1, 0),
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                    BackgroundTransparency = 1,
+                    Parent = row
+                })
+
+                local distColor = colors.text
+                if dist <= 100 then
+                    distColor = colors.red
+                elseif dist <= 300 then
+                    distColor = colors.orange
+                end
+
+                create("TextLabel", {
+                    Text = dist .. "m",
+                    Font = fonts.bold,
+                    TextSize = 10,
+                    TextColor3 = distColor,
+                    Position = UDim2.new(0.65, 0, 0, 0),
+                    Size = UDim2.new(0.35, -6, 1, 0),
+                    TextXAlignment = Enum.TextXAlignment.Right,
+                    BackgroundTransparency = 1,
+                    Parent = row
+                })
+
+                -- Оповещение при приближении игрока на 1000 метров
+                if dist <= 1000 and not notifiedPlayers[plr.UserId] then
+                    notifiedPlayers[plr.UserId] = true
+                    notify("RADAR WARNING", plr.DisplayName .. " nearby: " .. dist .. "m", 4, colors.orange)
+                elseif dist > 1100 then
+                    notifiedPlayers[plr.UserId] = nil
+                end
+            end
+        end
+    end
+end)
+
+-- ==============================================================================
+-- 8. ГЛАВНАЯ ПАНЕЛЬ И НАВИГАЦИЯ (MAIN PANEL 760x520)
+-- ==============================================================================
+local mainPanel = create("Frame", {
+    Name = "ZAKZAR_MainPanel",
+    Size = UDim2.new(0, 760, 0, 520),
+    Position = UDim2.new(0.5, -380, 0.5, -260),
+    BackgroundColor3 = colors.bg,
+    BorderSizePixel = 0,
+    Visible = false, -- Меню по умолчанию скрыто (открывается по клавише Insert)
+    Parent = screenGui
+})
+create("UICorner", { CornerRadius = UDim.new(0, 14), Parent = mainPanel })
+create("UIStroke", { Color = colors.stroke, Thickness = 1.2, Parent = mainPanel })
+
+-- 8.1 ВЕРХНЯЯ ПАНЕЛЬ (TOP BAR)
+local topBar = create("Frame", {
+    Name = "TopBar",
+    Size = UDim2.new(1, 0, 0, 42),
+    BackgroundColor3 = colors.bgDark,
+    BorderSizePixel = 0,
+    Parent = mainPanel
+})
+create("UICorner", { CornerRadius = UDim.new(0, 14), Parent = topBar })
+-- Заплатка для скругления нижних углов шапки
+create("Frame", {
+    Size = UDim2.new(1, 0, 0, 10),
+    Position = UDim2.new(0, 0, 1, -10),
+    BackgroundColor3 = colors.bgDark,
+    BorderSizePixel = 0,
+    Parent = topBar
+})
+-- Привязываем перемещение ТОЛЬКО к TopBar
+makeDraggable(mainPanel, topBar)
+
+-- Логотип
+local logoContainer = create("Frame", {
+    Size = UDim2.new(0, 140, 1, 0),
+    BackgroundTransparency = 1,
+    Parent = topBar
+})
+
+-- Нарисованный логотип: кольцо + центральная точка
+local logoIcon = create("Frame", {
+    Size = UDim2.new(0, 22, 0, 22),
+    Position = UDim2.new(0, 8, 0.5, -11),
+    BackgroundColor3 = colors.accent,
+    BorderSizePixel = 0,
+    Parent = logoContainer
+})
+create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = logoIcon })
+create("UIStroke", { Color = colors.accent, Thickness = 2, Parent = logoIcon })
+
+local logoDot = create("Frame", {
+    Size = UDim2.new(0, 8, 0, 8),
+    Position = UDim2.new(0.5, -4, 0.5, -4),
+    BackgroundColor3 = colors.bright,
+    BorderSizePixel = 0,
+    ZIndex = 2,
+    Parent = logoIcon
+})
+create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = logoDot })
+
+local logoInner = create("Frame", {
+    Size = UDim2.new(0, 14, 0, 14),
+    Position = UDim2.new(0.5, -7, 0.5, -7),
+    BackgroundColor3 = colors.bgDark,
+    BorderSizePixel = 0,
+    ZIndex = 1,
+    Parent = logoIcon
+})
+create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = logoInner })
+
+create("TextLabel", {
+    Text = "ZAKZAR",
+    Font = fonts.bold,
+    TextSize = 14,
+    TextColor3 = colors.bright,
+    Position = UDim2.new(0, 34, 0, 0),
+    Size = UDim2.new(0, 70, 1, 0),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    BackgroundTransparency = 1,
+    Parent = logoContainer
+})
+
+-- Разделитель
+create("Frame", {
+    Size = UDim2.new(0, 1, 0, 20),
+    Position = UDim2.new(0, 110, 0.5, -10),
+    BackgroundColor3 = colors.stroke,
+    BorderSizePixel = 0,
+    Parent = logoContainer
+})
+
+-- Поле поиска (Search Box)
+local searchFrame = create("Frame", {
+    Size = UDim2.new(0, 220, 0, 26),
+    Position = UDim2.new(0, 126, 0.5, -13),
+    BackgroundColor3 = colors.surface,
+    Parent = topBar
+})
+create("UICorner", { CornerRadius = UDim.new(0, 6), Parent = searchFrame })
+
+-- Нарисованная лупа: круг + диагональная ручка
+local searchIconFrame = create("Frame", {
+    Size = UDim2.new(0, 24, 1, 0),
+    BackgroundTransparency = 1,
+    Parent = searchFrame
+})
+local lens = create("Frame", {
+    Size = UDim2.new(0, 9, 0, 9),
+    Position = UDim2.new(0.5, -6, 0.5, -6),
+    BackgroundTransparency = 1,
+    Parent = searchIconFrame
+})
+create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = lens })
+create("UIStroke", { Color = colors.dim, Thickness = 1.5, Parent = lens })
+
+local lensHandle = create("Frame", {
+    Size = UDim2.new(0, 5, 0, 1.5),
+    Position = UDim2.new(0.5, 2, 0.5, 2),
+    Rotation = 45,
+    BackgroundColor3 = colors.dim,
+    BorderSizePixel = 0,
+    Parent = searchIconFrame
+})
+create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = lensHandle })
+
+local searchInput = create("TextBox", {
+    Size = UDim2.new(1, -28, 1, 0),
+    Position = UDim2.new(0, 26, 0, 0),
+    BackgroundTransparency = 1,
+    Font = fonts.regular,
+    TextSize = 11,
+    TextColor3 = colors.bright,
+    PlaceholderColor3 = colors.dim,
+    PlaceholderText = "Search",
+    ClearTextOnFocus = false,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = searchFrame
+})
+
+-- Кнопка сетки (Grid) — нарисованная из 4 кружков
+local gridBtn = create("TextButton", {
+    Size = UDim2.new(0, 28, 0, 28),
+    Position = UDim2.new(1, -70, 0.5, -14),
+    BackgroundColor3 = colors.surface,
+    Text = "",
+    AutoButtonColor = false,
+    Parent = topBar
+})
+create("UICorner", { CornerRadius = UDim.new(0, 6), Parent = gridBtn })
+for _, gpos in ipairs({
+    UDim2.new(0.5, -5, 0.5, -5), UDim2.new(0.5, 1, 0.5, -5),
+    UDim2.new(0.5, -5, 0.5, 1),  UDim2.new(0.5, 1, 0.5, 1)
+}) do
+    local gdot = create("Frame", {
+        Size = UDim2.new(0, 4, 0, 4),
+        Position = gpos,
+        BackgroundColor3 = colors.text,
+        BorderSizePixel = 0,
+        Parent = gridBtn
+    })
+    create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = gdot })
+end
+
+-- Кнопка закрытия (Close) — нарисованный крестик из двух линий
+local closeBtn = create("TextButton", {
+    Size = UDim2.new(0, 28, 0, 28),
+    Position = UDim2.new(1, -36, 0.5, -14),
+    BackgroundColor3 = colors.surface,
+    Text = "",
+    AutoButtonColor = false,
+    Parent = topBar
+})
+create("UICorner", { CornerRadius = UDim.new(0, 6), Parent = closeBtn })
+local xLine1 = create("Frame", {
+    Size = UDim2.new(0, 14, 0, 2),
+    Position = UDim2.new(0.5, -7, 0.5, -1),
+    Rotation = 45,
+    BackgroundColor3 = colors.dim,
+    BorderSizePixel = 0,
+    Parent = closeBtn
+})
+create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = xLine1 })
+local xLine2 = create("Frame", {
+    Size = UDim2.new(0, 14, 0, 2),
+    Position = UDim2.new(0.5, -7, 0.5, -1),
+    Rotation = -45,
+    BackgroundColor3 = colors.dim,
+    BorderSizePixel = 0,
+    Parent = closeBtn
+})
+create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = xLine2 })
+closeBtn.MouseButton1Click:Connect(function()
+    mainPanel.Visible = false
+end)
+
+-- 8.2 БОКОВАЯ ПАНЕЛЬ (SIDEBAR - 48px wide)
+local sidebar = create("Frame", {
+    Name = "Sidebar",
+    Size = UDim2.new(0, 48, 1, -42),
+    Position = UDim2.new(0, 0, 0, 42),
+    BackgroundColor3 = colors.sidebar,
+    BorderSizePixel = 0,
+    Parent = mainPanel
+})
+create("UICorner", { CornerRadius = UDim.new(0, 14), Parent = sidebar })
+create("Frame", {
+    Size = UDim2.new(0, 10, 1, 0),
+    Position = UDim2.new(1, -10, 0, 0),
+    BackgroundColor3 = colors.sidebar,
+    BorderSizePixel = 0,
+    Parent = sidebar
+})
+
+local tabBtnContainer = create("Frame", {
+    Size = UDim2.new(1, 0, 0, 260),
+    Position = UDim2.new(0, 0, 0, 10),
+    BackgroundTransparency = 1,
+    Parent = sidebar
+})
+create("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    Padding = UDim.new(0, 8),
+    Parent = tabBtnContainer
+})
+
+-- Подпись автора внизу боковой панели
+create("TextLabel", {
+    Text = "ZAKZAR\nStudio",
+    Font = fonts.bold,
+    TextSize = 8,
+    TextColor3 = colors.dim,
+    Size = UDim2.new(1, 0, 0, 30),
+    Position = UDim2.new(0, 0, 1, -36),
+    BackgroundTransparency = 1,
+    Parent = sidebar
+})
+
+-- 8.3 ОБЛАСТЬ СОДЕРЖИМОГО (CONTENT AREA)
+local contentArea = create("Frame", {
+    Name = "ContentArea",
+    Size = UDim2.new(1, -48, 1, -42),
+    Position = UDim2.new(0, 48, 0, 42),
+    BackgroundTransparency = 1,
+    ClipsDescendants = true,
+    Parent = mainPanel
+})
+
+local tabs = {}
+local tabButtons = {}
+local activeTab = 1
+
+-- 📚 Функция для рисования векторных иконок из Frame-ов (строго без эмодзи)
+local function drawIcon(parent, iconType, iconColor)
+    if iconType == "bolt" then
+        local top = create("Frame", { Size = UDim2.new(0,8,0,2), Position = UDim2.new(0.5,-2,0.2,0), Rotation = -30, BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(1,0), Parent = top })
+        local mid = create("Frame", { Size = UDim2.new(0,10,0,2), Position = UDim2.new(0.5,-6,0.42,0), Rotation = 0, BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(1,0), Parent = mid })
+        local bot = create("Frame", { Size = UDim2.new(0,8,0,2), Position = UDim2.new(0.5,-4,0.6,0), Rotation = -30, BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(1,0), Parent = bot })
+    elseif iconType == "crosshair" then
+        local ring = create("Frame", { Size = UDim2.new(0,14,0,14), Position = UDim2.new(0.5,-7,0.5,-7), BackgroundTransparency = 1, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(1,0), Parent = ring })
+        create("UIStroke", { Color = iconColor, Thickness = 1.5, Parent = ring })
+        local dot = create("Frame", { Size = UDim2.new(0,3,0,3), Position = UDim2.new(0.5,-1.5,0.5,-1.5), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(1,0), Parent = dot })
+        create("Frame", { Size = UDim2.new(0,2,0,5), Position = UDim2.new(0.5,-1,0.12,0), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        create("Frame", { Size = UDim2.new(0,2,0,5), Position = UDim2.new(0.5,-1,0.7,0), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        create("Frame", { Size = UDim2.new(0,5,0,2), Position = UDim2.new(0.12,0,0.5,-1), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        create("Frame", { Size = UDim2.new(0,5,0,2), Position = UDim2.new(0.7,0,0.5,-1), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+    elseif iconType == "eye" then
+        local outer = create("Frame", { Size = UDim2.new(0,18,0,10), Position = UDim2.new(0.5,-9,0.5,-5), BackgroundTransparency = 1, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(0,5), Parent = outer })
+        create("UIStroke", { Color = iconColor, Thickness = 1.5, Parent = outer })
+        local pupil = create("Frame", { Size = UDim2.new(0,6,0,6), Position = UDim2.new(0.5,-3,0.5,-3), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = outer })
+        create("UICorner", { CornerRadius = UDim.new(1,0), Parent = pupil })
+    elseif iconType == "shield" then
+        local sh = create("Frame", { Size = UDim2.new(0,14,0,16), Position = UDim2.new(0.5,-7,0.5,-8), BackgroundTransparency = 1, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(0,4), Parent = sh })
+        create("UIStroke", { Color = iconColor, Thickness = 1.5, Parent = sh })
+        create("Frame", { Size = UDim2.new(0,1.5,0.55,0), Position = UDim2.new(0.5,-0.75,0.2,0), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = sh })
+        create("Frame", { Size = UDim2.new(0.55,0,0,1.5), Position = UDim2.new(0.22,0,0.4,0), BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = sh })
+    elseif iconType == "gear" then
+        local ring = create("Frame", { Size = UDim2.new(0,10,0,10), Position = UDim2.new(0.5,-5,0.5,-5), BackgroundTransparency = 1, Parent = parent })
+        create("UICorner", { CornerRadius = UDim.new(1,0), Parent = ring })
+        create("UIStroke", { Color = iconColor, Thickness = 1.5, Parent = ring })
+        for _, pos in ipairs({
+            {UDim2.new(0.5,-1, 0.08,0), UDim2.new(0,2,0,5)},
+            {UDim2.new(0.5,-1, 0.72,0), UDim2.new(0,2,0,5)},
+            {UDim2.new(0.08,0, 0.5,-1), UDim2.new(0,5,0,2)},
+            {UDim2.new(0.72,0, 0.5,-1), UDim2.new(0,5,0,2)},
+        }) do
+            create("Frame", { Position = pos[1], Size = pos[2], BackgroundColor3 = iconColor, BorderSizePixel = 0, Parent = parent })
+        end
+    end
+end
+
+local tabDefinitions = {
+    { id = 1, iconType = "bolt",      name = "Movement",   twoColumns = true  },
+    { id = 2, iconType = "crosshair", name = "Combat",     twoColumns = true  },
+    { id = 3, iconType = "eye",       name = "Visuals",    twoColumns = true  },
+    { id = 4, iconType = "shield",    name = "Loot & ESP", twoColumns = true  },
+    { id = 5, iconType = "gear",      name = "Settings",   twoColumns = false }
+}
+
+local function switchTab(tabIndex)
+    activeTab = tabIndex
+    for i, tabData in ipairs(tabs) do
+        tabData.frame.Visible = (i == tabIndex)
+        local btn = tabButtons[i]
+        local isActive = (i == tabIndex)
+        tween(btn, 0.15, { BackgroundColor3 = isActive and colors.accent or colors.sidebar })
+        for _, child in pairs(btn:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        drawIcon(btn, tabDefinitions[i].iconType, isActive and colors.bright or colors.dim)
+    end
+end
+
+-- Переключение вкладок колесиком мыши над сайдбаром
+sidebar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseWheel then
+        if input.Position.Z > 0 then
+            local nextTab = activeTab - 1
+            if nextTab < 1 then nextTab = #tabDefinitions end
+            switchTab(nextTab)
+        else
+            local nextTab = activeTab + 1
+            if nextTab > #tabDefinitions then nextTab = 1 end
+            switchTab(nextTab)
+        end
+    end
+end)
+
+-- Создание каркаса вкладок
+for i, tabDef in ipairs(tabDefinitions) do
+    local tabBtn = create("TextButton", {
+        Name = "TabBtn_" .. tabDef.name,
+        Size = UDim2.new(0, 36, 0, 36),
+        BackgroundColor3 = (i == 1 and colors.accent or colors.sidebar),
+        Text = "",
+        AutoButtonColor = false,
+        Parent = tabBtnContainer
+    })
+    create("UICorner", { CornerRadius = UDim.new(0, 8), Parent = tabBtn })
+    drawIcon(tabBtn, tabDef.iconType, (i == 1) and colors.bright or colors.dim)
+
+    tabBtn.MouseButton1Click:Connect(function()
+        switchTab(i)
+    end)
+    table.insert(tabButtons, tabBtn)
+
+    local tabFrame = create("Frame", {
+        Name = "TabContent_" .. tabDef.name,
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Visible = (i == 1),
+        Parent = contentArea
+    })
+
+    if tabDef.twoColumns then
+        -- Двухколоночный макет (левая 50%, правая 50%)
+        local leftCol = create("ScrollingFrame", {
+            Name = "LeftColumn",
+            Size = UDim2.new(0.5, -8, 1, -12),
+            Position = UDim2.new(0, 8, 0, 6),
+            BackgroundTransparency = 1,
+            ScrollBarThickness = 3,
+            ScrollBarImageColor3 = colors.track,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            Parent = tabFrame
+        })
+        create("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = leftCol })
+
+        local rightCol = create("ScrollingFrame", {
+            Name = "RightColumn",
+            Size = UDim2.new(0.5, -12, 1, -12),
+            Position = UDim2.new(0.5, 4, 0, 6),
+            BackgroundTransparency = 1,
+            ScrollBarThickness = 3,
+            ScrollBarImageColor3 = colors.track,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            Parent = tabFrame
+        })
+        create("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = rightCol })
+
+        table.insert(tabs, { frame = tabFrame, left = leftCol, right = rightCol, isTwoCol = true })
+    else
+        -- Полноразмерный одноколоночный макет (для настроек)
+        local fullCol = create("ScrollingFrame", {
+            Name = "FullColumn",
+            Size = UDim2.new(1, -16, 1, -12),
+            Position = UDim2.new(0, 8, 0, 6),
+            BackgroundTransparency = 1,
+            ScrollBarThickness = 3,
+            ScrollBarImageColor3 = colors.track,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            Parent = tabFrame
+        })
+        create("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = fullCol })
+
+        table.insert(tabs, { frame = tabFrame, full = fullCol, isTwoCol = false })
+    end
+end
+
+-- ==============================================================================
+-- 9. БИБЛИОТЕКА ЭЛЕМЕНТОВ УПРАВЛЕНИЯ (UI BUILDERS)
+-- ==============================================================================
+local searchableElements = {}
+
+-- 9.1 СОЗДАНИЕ СЕКЦИИ (SECTION CARD)
+local function addSection(parentCol, title)
+    create("TextLabel", {
+        Text = string.upper(title),
+        Font = fonts.bold,
+        TextSize = 10,
+        TextColor3 = colors.dim,
+        Size = UDim2.new(1, 0, 0, 16),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        BackgroundTransparency = 1,
+        Parent = parentCol
+    })
+
+    local card = create("Frame", {
+        Name = "Card_" .. title,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = colors.surface,
+        Parent = parentCol
+    })
+    create("UICorner", { CornerRadius = UDim.new(0, 8), Parent = card })
+    create("UIPadding", {
+        PaddingTop = UDim.new(0, 6),
+        PaddingBottom = UDim.new(0, 6),
+        PaddingLeft = UDim.new(0, 8),
+        PaddingRight = UDim.new(0, 8),
+        Parent = card
+    })
+    create("UIListLayout", {
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 6),
+        Parent = card
+    })
+    return card
+end
+
+-- 9.2 ПЕРЕКЛЮЧАТЕЛЬ (PILL TOGGLE)
+-- 📚 Точные спецификации: трек 38x20px, бегунок 14x14px, плавная анимация 0.15s
+local function addToggle(sectionCard, labelText, defaultVal, callback, opts)
+    opts = opts or {}
+    local isToggled = defaultVal or false
+    local onColor = opts.onColor or colors.accent
+
+    local row = create("Frame", {
+        Name = "ToggleRow_" .. labelText,
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundTransparency = 1,
+        Parent = sectionCard
+    })
+
+    table.insert(searchableElements, { name = labelText:lower(), object = row })
+
+    create("TextLabel", {
+        Text = labelText,
+        Font = fonts.medium,
+        TextSize = 11,
+        TextColor3 = colors.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Size = UDim2.new(0.55, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Parent = row
+    })
+
+    local rightSide = create("Frame", {
+        Size = UDim2.new(0.45, 0, 1, 0),
+        Position = UDim2.new(0.55, 0, 0, 0),
+        BackgroundTransparency = 1,
+        Parent = row
+    })
+    create("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        HorizontalAlignment = Enum.HorizontalAlignment.Right,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        Padding = UDim.new(0, 6),
+        Parent = rightSide
+    })
+
+    if opts.keybind then
+        local badge = create("TextLabel", {
+            Text = opts.keybind,
+            Font = fonts.bold,
+            TextSize = 9,
+            TextColor3 = colors.bright,
+            BackgroundColor3 = colors.bgDark,
+            Size = UDim2.new(0, 24, 0, 18),
+            Parent = rightSide
+        })
+        create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = badge })
+    end
+
+    if opts.hasDots then
+        local dotsBtn = create("TextButton", {
+            Text = "",
+            BackgroundColor3 = colors.bgDark,
+            Size = UDim2.new(0, 20, 0, 18),
+            AutoButtonColor = false,
+            Parent = rightSide
+        })
+        create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = dotsBtn })
+        for dx = -4, 4, 4 do
+            local d = create("Frame", {
+                Size = UDim2.new(0, 3, 0, 3),
+                Position = UDim2.new(0.5, dx - 1, 0.5, -1.5),
+                BackgroundColor3 = colors.dim,
+                BorderSizePixel = 0,
+                Parent = dotsBtn
+            })
+            create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = d })
+        end
+        dotsBtn.MouseButton1Click:Connect(function()
+            notify("OPTIONS", "Settings for: " .. labelText, 2, colors.accent)
+        end)
+    end
+
+    if opts.info then
+        local infoBtn = create("TextButton", {
+            Text = "",
+            BackgroundTransparency = 1,
+            Size = UDim2.new(0, 18, 0, 18),
+            AutoButtonColor = false,
+            Parent = rightSide
+        })
+        local infoCircle = create("Frame", {
+            Size = UDim2.new(0, 14, 0, 14),
+            Position = UDim2.new(0.5, -7, 0.5, -7),
+            BackgroundTransparency = 1,
+            Parent = infoBtn
+        })
+        create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = infoCircle })
+        create("UIStroke", { Color = colors.dim, Thickness = 1, Parent = infoCircle })
+        create("TextLabel", {
+            Text = "i",
+            Font = fonts.bold,
+            TextSize = 9,
+            TextColor3 = colors.dim,
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            Parent = infoCircle
+        })
+        infoBtn.MouseButton1Click:Connect(function()
+            notify("INFO", opts.info, 3, colors.accent)
+        end)
+    end
+
+    -- Pill Track (38x20px)
+    local track = create("TextButton", {
+        Size = UDim2.new(0, 38, 0, 20),
+        BackgroundColor3 = isToggled and onColor or colors.off,
+        Text = "",
+        AutoButtonColor = false,
+        Parent = rightSide
+    })
+    create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = track })
+
+    -- Knob (14x14px)
+    local knob = create("Frame", {
+        Size = UDim2.new(0, 14, 0, 14),
+        Position = isToggled and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7),
+        BackgroundColor3 = isToggled and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(110, 110, 130),
+        BorderSizePixel = 0,
+        Parent = track
+    })
+    create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = knob })
+
+    local function setToggle(value, skipCallback)
+        isToggled = value
+        local targetPos = isToggled and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+        local targetTrackColor = isToggled and onColor or colors.off
+        local targetKnobColor = isToggled and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(110, 110, 130)
+
+        tween(knob, 0.15, { Position = targetPos, BackgroundColor3 = targetKnobColor })
+        tween(track, 0.15, { BackgroundColor3 = targetTrackColor })
+
+        if not skipCallback then
+            task.spawn(callback, isToggled)
+        end
+    end
+
+    track.MouseButton1Click:Connect(function()
+        setToggle(not isToggled)
+    end)
+
+    return { set = setToggle, get = function() return isToggled end }
+end
+
+-- 9.3 СЛАЙДЕР (INTERACTIVE DRAG SLIDER)
+-- 📚 Полностью кастомный интерактивный слайдер через события UserInputService
+local function addSlider(sectionCard, labelText, minVal, maxVal, defaultVal, unit, callback)
+    unit = unit or ""
+    local currentVal = defaultVal
+
+    local row = create("Frame", {
+        Name = "SliderRow_" .. labelText,
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundTransparency = 1,
+        Parent = sectionCard
+    })
+
+    table.insert(searchableElements, { name = labelText:lower(), object = row })
+
+    create("TextLabel", {
+        Text = labelText,
+        Font = fonts.medium,
+        TextSize = 11,
+        TextColor3 = colors.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Size = UDim2.new(0.38, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Parent = row
+    })
+
+    local valueLabel = create("TextLabel", {
+        Text = tostring(currentVal) .. (unit ~= "" and " " .. unit or ""),
+        Font = fonts.bold,
+        TextSize = 10,
+        TextColor3 = colors.accent,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Size = UDim2.new(0.2, 0, 1, 0),
+        Position = UDim2.new(0.38, 0, 0, 0),
+        BackgroundTransparency = 1,
+        Parent = row
+    })
+
+    -- Трек слайдера (40% ширины строки, высота 4px)
+    local sliderBg = create("Frame", {
+        Size = UDim2.new(0.4, 0, 0, 4),
+        Position = UDim2.new(0.6, 0, 0.5, -2),
+        BackgroundColor3 = colors.track,
+        Parent = row
+    })
+    create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = sliderBg })
+
+    local ratio = math.clamp((currentVal - minVal) / (maxVal - minVal), 0, 1)
+
+    local fill = create("Frame", {
+        Size = UDim2.new(ratio, 0, 1, 0),
+        BackgroundColor3 = colors.accent,
+        BorderSizePixel = 0,
+        Parent = sliderBg
+    })
+    create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = fill })
+
+    -- Бегунок слайдера (12x12px)
+    local knob = create("Frame", {
+        Size = UDim2.new(0, 12, 0, 12),
+        Position = UDim2.new(ratio, -6, 0.5, -6),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        BorderSizePixel = 0,
+        Parent = sliderBg
+    })
+    create("UICorner", { CornerRadius = UDim.new(1, 0), Parent = knob })
+
+    local dragging = false
+
+    local function updateFromInput(inputX)
+        local barAbsPos = sliderBg.AbsolutePosition.X
+        local barAbsWidth = sliderBg.AbsoluteSize.X
+        if barAbsWidth <= 0 then return end
+        local r = math.clamp((inputX - barAbsPos) / barAbsWidth, 0, 1)
+        local val = math.floor(minVal + (maxVal - minVal) * r + 0.5)
+        currentVal = val
+
+        fill.Size = UDim2.new(r, 0, 1, 0)
+        knob.Position = UDim2.new(r, -6, 0.5, -6)
+        valueLabel.Text = tostring(val) .. (unit ~= "" and " " .. unit or "")
+        task.spawn(callback, val)
+    end
+
+    sliderBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            updateFromInput(input.Position.X)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            updateFromInput(input.Position.X)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+
+    return {
+        set = function(val)
+            currentVal = math.clamp(val, minVal, maxVal)
+            local r = (currentVal - minVal) / (maxVal - minVal)
+            fill.Size = UDim2.new(r, 0, 1, 0)
+            knob.Position = UDim2.new(r, -6, 0.5, -6)
+            valueLabel.Text = tostring(currentVal) .. (unit ~= "" and " " .. unit or "")
+            callback(currentVal)
+        end
+    }
+end
+
+-- Поиск по элементам управления
+searchInput:GetPropertyChangedSignal("Text"):Connect(function()
+    local q = searchInput.Text:lower()
+    for _, item in ipairs(searchableElements) do
+        if q == "" or string.find(item.name, q, 1, true) then
+            item.object.Visible = true
+        else
+            item.object.Visible = false
+        end
+    end
+end)
+
+-- ==============================================================================
+-- 10. ЗАПОЛНЕНИЕ ВКЛАДОК (POPULATING TABS)
+-- ==============================================================================
+
+-- ------------------------------------------------------------------------------
+-- ВКЛАДКА 1: MOVEMENT
+-- ------------------------------------------------------------------------------
+local tab1Left = tabs[1].left
+local tab1Right = tabs[1].right
+
+-- Левая колонка
+local secSpeed = addSection(tab1Left, "SpeedHack")
+addToggle(secSpeed, "SpeedHack", false, function(on)
+    state.speedHack = on
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        if on then
+            state.defaultWalkSpeed = hum.WalkSpeed
+            hum.WalkSpeed = state.speedValue
+        else
+            hum.WalkSpeed = state.defaultWalkSpeed
+        end
+    end
+end, { hasDots = true })
+
+addSlider(secSpeed, "Speed", 16, 200, 16, "studs/s", function(val)
+    state.speedValue = val
+    if state.speedHack then
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = val end
+    end
+end)
+
+local secJump = addSection(tab1Left, "Infinite Jump")
+addToggle(secJump, "Infinite Jump", false, function(on)
+    state.infiniteJump = on
+end, { hasDots = true })
+
+addSlider(secJump, "Power", 5, 100, 50, "", function(val)
+    state.infiniteJumpPower = val
+end)
+
+local secKnocked = addSection(tab1Left, "Knocked")
+addToggle(secKnocked, "Fly While Knocked", false, function(on)
+    state.flyKnocked = on
+end, { info = "Позволяет летать даже при нахождении в состоянии оглушения или Ragdoll", hasDots = true })
+
+-- Правая колонка
+local secFly = addSection(tab1Right, "FlyHack")
+local flyToggleControl = addToggle(secFly, "FlyHack", false, function(on)
+    state.flyHack = on
+    notify("FLYHACK", on and "FlyHack activated [CFrame bypass]" or "FlyHack deactivated", 2, colors.accent)
+end, { keybind = "F4" })
+
+addSlider(secFly, "Fly Speed", 5, 200, 24, "studs/s", function(val)
+    state.flySpeed = val
+end)
+
+local secNoClip = addSection(tab1Right, "NoClip")
+-- 📚 [CRITICAL FIX V6 #1]: noclipOrigTransparency объявлена заранее и доступна внутри колбэка
+local noClipToggleControl = addToggle(secNoClip, "NoClip", false, function(on)
+    state.noClip = on
+    if not on then
+        for part, origT in pairs(noclipOrigTransparency) do
+            pcall(function()
+                if part and part.Parent then
+                    part.Transparency = origT
+                end
+            end)
+        end
+        table.clear(noclipOrigTransparency)
+    end
+    notify("NOCLIP", on and "NoClip activated" or "NoClip deactivated", 2, colors.green)
+end, { keybind = "F5" })
+
+local secFall = addSection(tab1Right, "No Fall Damage")
+local noFallToggleControl = addToggle(secFall, "No Fall Damage", false, function(on)
+    state.noFallDmg = on
+end, { keybind = "F6" })
+
+-- ------------------------------------------------------------------------------
+-- ВКЛАДКА 2: COMBAT
+-- ------------------------------------------------------------------------------
+local tab2Left = tabs[2].left
+local tab2Right = tabs[2].right
+
+-- Левая колонка
+local secAutoFarm = addSection(tab2Left, "Auto-Farm-Elder V3")
+local autoFarmToggleControl = addToggle(secAutoFarm, "Auto Farm", false, function(on)
+    state.autoFarm = on
+    if on then
+        notify("AUTO-FARM", "Авто-фарм активирован", 2, colors.green)
+    end
+end, { keybind = "F8", hasDots = true })
+
+create("TextLabel", {
+    Text = "Летит к мобам и фармит автоматически",
+    Font = fonts.regular,
+    TextSize = 10,
+    TextColor3 = colors.dim,
+    Size = UDim2.new(1, 0, 0, 16),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    BackgroundTransparency = 1,
+    Parent = secAutoFarm
+})
+
+-- Правая колонка
+local secMobCtrl = addSection(tab2Right, "Mob Control")
+addToggle(secMobCtrl, "Humanoid Pathfind Breaker", false, function(on)
+    state.pathfindBreaker = on
+    if on then
+        notify("PATHFIND", "Поиск путей гуманоидов нарушен", 2, colors.orange)
+    end
+end, { info = "Нарушает просчет путей мобов, обездвиживая искусственный интеллект", hasDots = true })
+
+addToggle(secMobCtrl, "Void Mobs", false, function(on)
+    if on then
+        local mobsFolder = workspace:FindFirstChild("Mobs") or workspace
+        local count = 0
+        for _, obj in pairs(mobsFolder:GetChildren()) do
+            if obj:IsA("Model") and obj ~= LocalPlayer.Character and obj:FindFirstChildOfClass("Humanoid") then
+                local root = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+                if root then
+                    pcall(function()
+                        root.CFrame = CFrame.new(root.Position.X, -500, root.Position.Z)
+                        count = count + 1
+                    end)
+                end
+            end
+        end
+        notify("VOID MOBS", "Отправлено в пустоту: " .. count .. " мобов", 3, colors.red)
+    end
+end, { hasDots = true })
+
+local bringToggleControl = addToggle(secMobCtrl, "Bring Mobs", false, function(on)
+    state.bringMobs = on
+    if on then
+        notify("BRING MOBS", "Телепортация мобов к вам активна", 2, colors.accent)
+    end
+end, { keybind = "F7", onColor = colors.accent })
+
+addSlider(secMobCtrl, "Distance", 1, 50, 5, "studs", function(val)
+    state.bringDistance = val
+end)
+
+addSlider(secMobCtrl, "Height", -10, 10, 0, "studs", function(val)
+    state.bringHeight = val
+end)
+
+addSlider(secMobCtrl, "Rotation", 0, 360, 0, "deg", function(val)
+    state.bringRotation = val
+end)
+
+-- ------------------------------------------------------------------------------
+-- ВКЛАДКА 3: VISUALS
+-- ------------------------------------------------------------------------------
+local tab3Left = tabs[3].left
+local tab3Right = tabs[3].right
+
+-- Левая колонка
+local secLighting = addSection(tab3Left, "Lighting")
+addToggle(secLighting, "Fullbright", false, function(on)
+    state.fullbright = on
+    if on then
+        Lighting.Ambient = Color3.fromRGB(200, 200, 200)
+        Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
+        Lighting.Brightness = 3
+        Lighting.ClockTime = 12
+        Lighting.ExposureCompensation = 0
+        for _, obj in pairs(Lighting:GetDescendants()) do
+            if obj:IsA("SunRaysEffect") or obj:IsA("BloomEffect") or obj:IsA("ColorCorrectionEffect") then
+                obj.Enabled = false
+            end
+        end
+    else
+        Lighting.Ambient = state.originalLighting.Ambient
+        Lighting.OutdoorAmbient = state.originalLighting.OutdoorAmbient
+        Lighting.Brightness = state.originalLighting.Brightness
+        Lighting.ClockTime = state.originalLighting.ClockTime
+        Lighting.ExposureCompensation = state.originalLighting.ExposureCompensation
+        for _, obj in pairs(Lighting:GetDescendants()) do
+            if obj:IsA("SunRaysEffect") or obj:IsA("BloomEffect") or obj:IsA("ColorCorrectionEffect") then
+                obj.Enabled = true
+            end
+        end
+    end
+end)
+
+addSlider(secLighting, "Brightness", 0, 10, 2, "", function(val)
+    state.brightnessVal = val
+    Lighting.Brightness = val
+end)
+
+addToggle(secLighting, "No Shadows", false, function(on)
+    state.noShadows = on
+    Lighting.GlobalShadows = not on
+end)
+
+addToggle(secLighting, "Change Time Of Day", false, function(on)
+    state.changeTimeOfDay = on
+    if on then Lighting.ClockTime = state.timeOfDayVal end
+end)
+
+local secCam = addSection(tab3Left, "Camera")
+addToggle(secCam, "Unlock Camera Zoom", false, function(on)
+    state.unlockZoom = on
+    LocalPlayer.CameraMaxZoomDistance = on and 9999 or 128
+end, { info = "Снимает ограничение максимального отдаления камеры", hasDots = true })
+
+local secPerf = addSection(tab3Left, "Performance")
+addToggle(secPerf, "No Animated Sea", false, function(on)
+    state.noAnimatedSea = on
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        terrain.WaterWaveSize = on and 0 or 0.15
+        terrain.WaterWaveSpeed = on and 0 or 10
+    end
+end)
+
+-- Правая колонка
+local secAtmosphere = addSection(tab3Right, "Atmosphere")
+addToggle(secAtmosphere, "No Fog", false, function(on)
+    state.noFog = on
+    Lighting.FogEnd = on and 999999 or state.originalLighting.FogEnd
+    local atmos = Lighting:FindFirstChildOfClass("Atmosphere")
+    if atmos then
+        atmos.Density = on and 0 or 0.3
+    end
+end, { info = "Полностью отключает туман карты" })
+
+addToggle(secAtmosphere, "Clear Sky", false, function(on)
+    state.clearSky = on
+    local sky = Lighting:FindFirstChildOfClass("Sky")
+    if sky then
+        sky.SkyboxBk = on and "" or sky.SkyboxBk
+    end
+end, { info = "Удаляет облака и затемнение атмосферы" })
+
+addToggle(secAtmosphere, "No Blur", false, function(on)
+    state.noBlur = on
+    for _, obj in pairs(Lighting:GetDescendants()) do
+        if obj:IsA("BlurEffect") then
+            obj.Enabled = not on
+        end
+    end
+end)
+
+local secScreen = addSection(tab3Right, "Screen")
+addToggle(secScreen, "No Blind", false, function(on)
+    state.noBlind = on
+end, { info = "Скрывает графические эффекты ослепления персонажа" })
+
+addToggle(secScreen, "No Sanity VFX", false, function(on)
+    state.noSanityVFX = on
+end, { info = "Удаляет визуальные искажения рассудка и безумия" })
+
+addToggle(secScreen, "Bar Percentages", false, function(on)
+    state.barPercentages = on
+end, { info = "Отображает точные числовые проценты на полосах здоровья/маны" })
+
+-- ------------------------------------------------------------------------------
+-- ВКЛАДКА 4: LOOT & ESP
+-- ------------------------------------------------------------------------------
+local tab4Left = tabs[4].left
+local tab4Right = tabs[4].right
+
+-- Левая колонка
+local secAutoLoot = addSection(tab4Left, "Auto Loot")
+addToggle(secAutoLoot, "Auto Loot", false, function(on)
+    state.autoLoot = on
+    if on then notify("LOOT", "Автосбор предметов активирован", 2, colors.green) end
+end)
+
+addSlider(secAutoLoot, "Loot Distance", 5, 100, 30, "m", function(val)
+    state.lootDistance = val
+end)
+
+local secPlayerESP = addSection(tab4Left, "Player ESP")
+addToggle(secPlayerESP, "Player ESP", false, function(on)
+    state.playerESP = on
+end, { onColor = colors.yellow })
+
+addToggle(secPlayerESP, "Show Health", true, function(on)
+    state.espShowHealth = on
+end)
+
+addToggle(secPlayerESP, "Show Distance", true, function(on)
+    state.espShowDist = on
+end)
+
+-- Правая колонка
+local secMobsESP = addSection(tab4Right, "Mobs ESP")
+addToggle(secMobsESP, "Mobs ESP", false, function(on)
+    state.mobsESP = on
+end, { onColor = colors.red })
+
+addToggle(secMobsESP, "Health Bar", true, function(on)
+    state.mobsHealthBar = on
+end)
+
+addToggle(secMobsESP, "Boxes", true, function(on)
+    state.mobsBoxes = on
+end)
+
+addSlider(secMobsESP, "ESP Distance", 10, 500, 100, "m", function(val)
+    state.mobsESPDistance = val
+end)
+
+local secChat = addSection(tab4Right, "Chat Logger")
+addToggle(secChat, "Log Own Messages", false, function(on)
+    state.logOwnMessages = on
+end, { info = "Записывать в лог собственные сообщения из чата" })
+
+addToggle(secChat, "Chat Logger", false, function(on)
+    state.chatLogger = on
+    if on then notify("CHAT LOGGER", "Перехват сообщений запущен", 2, colors.accent) end
+end, { info = "Логирует игровой чат в консоль F9 и всплывающие окна" })
+
+-- ------------------------------------------------------------------------------
+-- ВКЛАДКА 5: SETTINGS (ОДНОКОЛОНОЧНЫЙ МАКЕТ)
+-- ------------------------------------------------------------------------------
+local tab5Full = tabs[5].full
+
+local secKeybinds = addSection(tab5Full, "Keybinds")
+local keybindList = {
+    { key = "Insert", desc = "Открыть / скрыть главное меню ZAKZAR", color = colors.accent },
+    { key = "F4",     desc = "Быстрое переключение FlyHack",        color = colors.green  },
+    { key = "F5",     desc = "Быстрое переключение NoClip",         color = colors.orange },
+    { key = "F6",     desc = "Быстрое переключение No Fall Damage",  color = colors.yellow },
+    { key = "F7",     desc = "Притянуть всех мобов (Bring Mobs)",    color = colors.accent },
+    { key = "F8",     desc = "Автоматический фарм (Auto Farm)",     color = colors.red    }
+}
+
+for _, kb in ipairs(keybindList) do
+    local kbRow = create("Frame", {
+        Size = UDim2.new(1, 0, 0, 26),
+        BackgroundTransparency = 1,
+        Parent = secKeybinds
+    })
+    local badge = create("TextLabel", {
+        Text = kb.key,
+        Font = fonts.bold,
+        TextSize = 10,
+        TextColor3 = colors.bright,
+        BackgroundColor3 = kb.color,
+        Size = UDim2.new(0, 48, 0, 20),
+        Position = UDim2.new(0, 0, 0.5, -10),
+        Parent = kbRow
+    })
+    create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = badge })
+
+    create("TextLabel", {
+        Text = kb.desc,
+        Font = fonts.regular,
+        TextSize = 11,
+        TextColor3 = colors.text,
+        Position = UDim2.new(0, 56, 0, 0),
+        Size = UDim2.new(1, -60, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        BackgroundTransparency = 1,
+        Parent = kbRow
+    })
+end
+
+local secAbout = addSection(tab5Full, "About")
+create("TextLabel", {
+    Text = "ZAKZAR V6 — Premium Edition\nCFrame Fly + Anti-Cheat Bypass Architecture\nCreated by ZAKZAR Studio © 2024\n\nРазработано для MMO RPG плейсов в Roblox.",
+    Font = fonts.regular,
+    TextSize = 11,
+    TextColor3 = colors.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Size = UDim2.new(1, 0, 0, 60),
+    BackgroundTransparency = 1,
+    Parent = secAbout
+})
+
+-- ==============================================================================
+-- 11. ИГРОВАЯ ЛОГИКА И МЕХАНИКИ (GAME MECHANICS ENGINE)
+-- ==============================================================================
+
+-- 📚 11.1 БЕЗОПАСНЫЙ ПОЛЁТ (CFRAME FLY + INVISIBLE PLATFORM)
+-- ВАЖНО: Никаких BodyVelocity / BodyGyro! Используется математика CFrame и физическая подложка.
+local flyPlatform = Instance.new("Part")
+flyPlatform.Name = "Baseplate_Shadow"
+flyPlatform.Size = Vector3.new(4, 0.3, 4)
+flyPlatform.Transparency = 1
+flyPlatform.Anchored = true
+flyPlatform.CanCollide = true
+flyPlatform.CastShadow = false
+flyPlatform.CanQuery = false
+flyPlatform.CanTouch = false
+flyPlatform.Parent = workspace.Terrain
+
+RunService.RenderStepped:Connect(function(dt)
+    if not state.flyHack then
+        flyPlatform.CFrame = CFrame.new(0, -9999, 0)
+        return
+    end
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+
+    if hum:GetState() == Enum.HumanoidStateType.Ragdoll and not state.flyKnocked then
+        return
+    end
+
+    local moveDir = Vector3.zero
+    local camCF = Camera.CFrame
+
+    if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+        moveDir = moveDir + camCF.LookVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+        moveDir = moveDir - camCF.LookVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+        moveDir = moveDir - camCF.RightVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+        moveDir = moveDir + camCF.RightVector
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+        moveDir = moveDir + Vector3.new(0, 1, 0)
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+        moveDir = moveDir - Vector3.new(0, 1, 0)
+    end
+
+    if moveDir.Magnitude > 0 then
+        hrp.CFrame = hrp.CFrame + (moveDir.Unit * (state.flySpeed * dt))
+    end
+
+    -- Симуляция отрицательной микроскопической скорости для обхода детектора анти-чита
+    hrp.AssemblyLinearVelocity = Vector3.new(0, -0.1, 0)
+    -- Невидимая платформа следует строго на 3.5 студа ниже игрока
+    flyPlatform.CFrame = hrp.CFrame * CFrame.new(0, -3.5, 0)
+end)
+
+-- 📚 11.2 БЕСКОНЕЧНЫЙ ПРЫЖОК (INFINITE JUMP)
+UserInputService.JumpRequest:Connect(function()
+    if state.infiniteJump then
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, state.infiniteJumpPower, hrp.AssemblyLinearVelocity.Z)
+            end
+        end
+    end
+end)
+
+-- 📚 11.3 ПРОХОД СКВОЗЬ СТЕНЫ (NOCLIP) — REWRITTEN V6.1
+-- Roblox Humanoid принудительно восстанавливает CanCollide = true на HumanoidRootPart,
+-- Head, Torso/UpperTorso ПОСЛЕ события Stepped, но ДО реального расчёта физики.
+-- Решение: отключаем коллизию в ТРИ момента кадра (Stepped + RenderStepped + Heartbeat)
+-- и дополнительно блокируем стейт-машину гуманоида, чтобы она не вмешивалась.
+
+-- Шаг 1: Ядро — функция отключения коллизий
+local function disableCharCollision()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = false
+        end
+    end
+end
+
+-- Шаг 2: Тройная подписка — гарантирует перекрытие любого окна восстановления Humanoid
+RunService.Stepped:Connect(function()
+    if state.noClip then disableCharCollision() end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if state.noClip then disableCharCollision() end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if state.noClip then disableCharCollision() end
+end)
+
+-- Шаг 3: Визуальная прозрачность стен — вынесена в отдельный тикер 10 Гц,
+-- чтобы не забивать каждый физический фрейм тяжёлым GetPartBoundsInRadius
+task.spawn(function()
+    while task.wait(0.1) do
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+        if state.noClip and hrp then
+            -- Очистка далёких / удалённых частей
+            local toRemove = {}
+            for part, origT in pairs(noclipOrigTransparency) do
+                if not part or not part.Parent then
+                    toRemove[part] = true
+                elseif (part.Position - hrp.Position).Magnitude > 12 then
+                    pcall(function() part.Transparency = origT end)
+                    toRemove[part] = true
+                end
+            end
+            for p in pairs(toRemove) do
+                noclipOrigTransparency[p] = nil
+            end
+
+            -- Сделать ближайшие стены полупрозрачными
+            local params = OverlapParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = { char }
+            local nearby = workspace:GetPartBoundsInRadius(hrp.Position, 6, params)
+            for _, part in pairs(nearby) do
+                if part:IsA("BasePart") and noclipOrigTransparency[part] == nil then
+                    noclipOrigTransparency[part] = part.Transparency
+                    part.Transparency = math.max(part.Transparency, 0.7)
+                end
+            end
+        elseif not state.noClip and next(noclipOrigTransparency) then
+            -- Восстановить прозрачность при выключении
+            for part, origT in pairs(noclipOrigTransparency) do
+                pcall(function()
+                    if part and part.Parent then
+                        part.Transparency = origT
+                    end
+                end)
+            end
+            table.clear(noclipOrigTransparency)
+        end
+    end
+end)
+
+-- 📚 11.4 ЗАЩИТА ОТ УРОНА ПРИ ПАДЕНИИ (NO FALL DAMAGE)
+local function setupFallDamageProtection(char)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if not hum then return end
+
+    local lastHealth = hum.Health
+    local wasFlying = false
+
+    hum.StateChanged:Connect(function(old, new)
+        if state.noFallDmg then
+            if new == Enum.HumanoidStateType.Freefall then
+                wasFlying = true
+                lastHealth = hum.Health
+            elseif wasFlying and (new == Enum.HumanoidStateType.Landed or new == Enum.HumanoidStateType.Running) then
+                task.defer(function()
+                    if hum.Health < lastHealth then
+                        hum.Health = lastHealth
+                    end
+                end)
+                wasFlying = false
+            end
+        end
+    end)
+
+    hum.HealthChanged:Connect(function(newHealth)
+        if state.noFallDmg and wasFlying and newHealth < lastHealth then
+            hum.Health = lastHealth
+        end
+    end)
+
+    hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+    hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+end
+
+if LocalPlayer.Character then
+    setupFallDamageProtection(LocalPlayer.Character)
+end
+
+-- 📚 11.5 ПРИТЯГИВАНИЕ МОБОВ (BRING MOBS)
+-- 📚 [CRITICAL FIX V6 #3]: Враппер pcall со снятием Anchored=false при ошибке установки CFrame
+local bringFailedNotified = false
+RunService.Heartbeat:Connect(function()
+    if not state.bringMobs then return end
+
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local mobsContainer = workspace:FindFirstChild("Mobs") or workspace
+
+    for _, mob in pairs(mobsContainer:GetChildren()) do
+        if mob:IsA("Model") and mob ~= char and mob:FindFirstChildOfClass("Humanoid") then
+            local mobHRP = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart or mob:FindFirstChildWhichIsA("BasePart")
+            if mobHRP then
+                local targetCF = hrp.CFrame
+                    * CFrame.new(0, state.bringHeight, 0)
+                    * CFrame.Angles(0, math.rad(state.bringRotation), 0)
+                    * CFrame.new(0, 0, -state.bringDistance)
+
+                local success, _ = pcall(function()
+                    mobHRP.CFrame = targetCF
+                    mobHRP.AssemblyLinearVelocity = Vector3.zero
+                    mobHRP.AssemblyAngularVelocity = Vector3.zero
+                end)
+
+                if not success then
+                    local retrySuccess, _ = pcall(function()
+                        mobHRP.Anchored = false
+                        mobHRP.CFrame = targetCF
+                        mobHRP.AssemblyLinearVelocity = Vector3.zero
+                        mobHRP.AssemblyAngularVelocity = Vector3.zero
+                    end)
+
+                    if not retrySuccess and not bringFailedNotified then
+                        bringFailedNotified = true
+                        notify("BRING ERROR", "Сетевое владение моба заблокировано", 3, colors.orange)
+                        task.delay(5, function() bringFailedNotified = false end)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- 📚 11.6 АВТО-ФАРМ (AUTO FARM ELDER V3)
+task.spawn(function()
+    while task.wait(0.2) do
+        if state.autoFarm then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local mobsContainer = workspace:FindFirstChild("Mobs") or workspace
+                local closestMob = nil
+                local shortestDist = math.huge
+
+                for _, mob in pairs(mobsContainer:GetChildren()) do
+                    if mob:IsA("Model") and mob ~= char and mob:FindFirstChildOfClass("Humanoid") then
+                        local mobHum = mob:FindFirstChildOfClass("Humanoid")
+                        local mobRoot = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
+                        if mobHum and mobHum.Health > 0 and mobRoot then
+                            local d = (mobRoot.Position - hrp.Position).Magnitude
+                            if d < shortestDist then
+                                shortestDist = d
+                                closestMob = mobRoot
+                            end
+                        end
+                    end
+                end
+
+                if closestMob then
+                    hrp.CFrame = CFrame.new(closestMob.Position + Vector3.new(0, 4, 0), closestMob.Position)
+                    pcall(function()
+                        local tool = char:FindFirstChildOfClass("Tool")
+                        if tool then tool:Activate() end
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+-- 📚 11.7 АВТО-ЛУТ (AUTO LOOT)
+-- 📚 [CRITICAL FIX V6 #4]: Безопасный запуск ProximityPrompt: сначала проверка fireproximityprompt,
+-- затем полнофункциональный фоллбэк через InputHoldBegin / task.wait / InputHoldEnd.
+task.spawn(function()
+    while task.wait(0.5) do
+        if state.autoLoot then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, obj in pairs(workspace:GetDescendants()) do
+                    if not state.autoLoot then break end
+
+                    if obj:IsA("ProximityPrompt") and obj.Enabled then
+                        local promptPart = obj.Parent
+                        local promptPos = nil
+                        if promptPart:IsA("BasePart") then
+                            promptPos = promptPart.Position
+                        elseif promptPart:IsA("Model") then
+                            promptPos = promptPart:GetPivot().Position
+                        elseif promptPart:IsA("Attachment") then
+                            promptPos = promptPart.WorldPosition
+                        end
+
+                        if promptPos and (promptPos - hrp.Position).Magnitude <= state.lootDistance then
+                            local promptTriggered = false
+                            if typeof(fireproximityprompt) == "function" then
+                                local ok = pcall(function()
+                                    fireproximityprompt(obj)
+                                end)
+                                if ok then promptTriggered = true end
+                            end
+
+                            if not promptTriggered then
+                                pcall(function()
+                                    obj:InputHoldBegin()
+                                    local hold = obj.HoldDuration or 0
+                                    if hold > 0 then
+                                        task.wait(hold)
+                                    else
+                                        task.wait(0.05)
+                                    end
+                                    obj:InputHoldEnd()
+                                end)
+                            end
+                        end
+                    elseif obj:IsA("TouchTransmitter") then
+                        local part = obj.Parent
+                        if part and part:IsA("BasePart") and (part.Position - hrp.Position).Magnitude <= state.lootDistance then
+                            if typeof(firetouchinterest) == "function" then
+                                pcall(function()
+                                    firetouchinterest(hrp, part, 0)
+                                    task.wait()
+                                    firetouchinterest(hrp, part, 1)
+                                end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- 📚 11.8 СИСТЕМА ESP (PLAYER & MOBS HIGHLIGHTS)
+local function createESP(model, isPlayer)
+    if espStorage[model] then return end
+
+    local color = isPlayer and colors.yellow or colors.red
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ZAKZAR_ESP_Highlight"
+    highlight.Adornee = model
+    highlight.FillColor = color
+    highlight.FillTransparency = 0.5
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.OutlineTransparency = 0.2
+    highlight.Parent = screenGui
+
+    local head = model:FindFirstChild("Head") or model.PrimaryPart
+    local billboard = nil
+    if head then
+        billboard = Instance.new("BillboardGui")
+        billboard.Name = "ZAKZAR_ESP_Tag"
+        billboard.Adornee = head
+        billboard.Size = UDim2.new(0, 110, 0, 32)
+        billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = screenGui
+
+        create("TextLabel", {
+            Name = "NameLabel",
+            Text = model.Name,
+            Font = fonts.bold,
+            TextSize = 10,
+            TextColor3 = color,
+            Size = UDim2.new(1, 0, 0.5, 0),
+            BackgroundTransparency = 1,
+            Parent = billboard
+        })
+
+        create("TextLabel", {
+            Name = "DistLabel",
+            Text = "0m",
+            Font = fonts.regular,
+            TextSize = 9,
+            TextColor3 = colors.bright,
+            Position = UDim2.new(0, 0, 0.5, 0),
+            Size = UDim2.new(1, 0, 0.5, 0),
+            BackgroundTransparency = 1,
+            Parent = billboard
+        })
+    end
+
+    espStorage[model] = {
+        highlight = highlight,
+        billboard = billboard,
+        isPlayer = isPlayer
+    }
+end
+
+local function removeESP(model)
+    local data = espStorage[model]
+    if data then
+        if data.highlight then
+            pcall(function() data.highlight:Destroy() end)
+        end
+        if data.billboard then
+            pcall(function() data.billboard:Destroy() end)
+        end
+        espStorage[model] = nil
+    end
+end
+
+-- Рендеринг и обновление меток ESP
+RunService.RenderStepped:Connect(function()
+    local myChar = LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+    -- 1. Игроки (Player ESP)
+    if state.playerESP then
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                if not espStorage[plr.Character] then
+                    createESP(plr.Character, true)
+                else
+                    local data = espStorage[plr.Character]
+                    if data.billboard and myHRP and plr.Character:FindFirstChild("HumanoidRootPart") then
+                        local d = math.floor((plr.Character.HumanoidRootPart.Position - myHRP.Position).Magnitude)
+                        local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                        local hpText = (state.espShowHealth and hum) and string.format(" [%d HP]", math.floor(hum.Health)) or ""
+                        local distText = state.espShowDist and (d .. "m") or ""
+                        local distLabel = data.billboard:FindFirstChild("DistLabel")
+                        if distLabel then
+                            distLabel.Text = distText .. hpText
+                        end
+                    end
+                end
+            end
+        end
+    else
+        for model, data in pairs(espStorage) do
+            if data.isPlayer then removeESP(model) end
+        end
+    end
+
+    -- 2. Мобы (Mobs ESP)
+    if state.mobsESP then
+        local mobsContainer = workspace:FindFirstChild("Mobs") or workspace
+        for _, obj in pairs(mobsContainer:GetChildren()) do
+            if obj:IsA("Model") and obj ~= myChar and obj:FindFirstChildOfClass("Humanoid") then
+                local root = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+                if root and myHRP then
+                    local d = (root.Position - myHRP.Position).Magnitude
+                    if d <= state.mobsESPDistance then
+                        if not espStorage[obj] then
+                            createESP(obj, false)
+                        else
+                            local data = espStorage[obj]
+                            if data.highlight then
+                                data.highlight.Enabled = state.mobsBoxes
+                            end
+                            if data.billboard then
+                                local mobHum = obj:FindFirstChildOfClass("Humanoid")
+                                local hpText = (state.mobsHealthBar and mobHum) and string.format(" [%d HP]", math.floor(mobHum.Health)) or ""
+                                local distLabel = data.billboard:FindFirstChild("DistLabel")
+                                if distLabel then
+                                    distLabel.Text = math.floor(d) .. "m" .. hpText
+                                end
+                            end
+                        end
+                    else
+                        if espStorage[obj] and not espStorage[obj].isPlayer then
+                            removeESP(obj)
+                        end
+                    end
+                end
+            end
+        end
+    else
+        for model, data in pairs(espStorage) do
+            if not data.isPlayer then removeESP(model) end
+        end
+    end
+end)
+
+-- 📚 11.9 ЧАТ-ЛОГГЕР (CHAT LOGGER)
+local function handleChatMessage(senderName, messageText)
+    if not state.chatLogger then return end
+    if senderName == LocalPlayer.DisplayName and not state.logOwnMessages then return end
+
+    print(string.format("[ZAKZAR CHAT] %s: %s", senderName, messageText))
+    notify("CHAT (" .. senderName .. ")", messageText, 3, colors.accent)
+end
+
+pcall(function()
+    TextChatService.MessageReceived:Connect(function(msg)
+        if msg.TextSource then
+            local sender = Players:GetPlayerByUserId(msg.TextSource.UserId)
+            handleChatMessage(sender and sender.DisplayName or "Unknown", msg.Text)
+        end
+    end)
+end)
+
+for _, plr in pairs(Players:GetPlayers()) do
+    plr.Chatted:Connect(function(msg)
+        handleChatMessage(plr.DisplayName, msg)
+    end)
+end
+Players.PlayerAdded:Connect(function(plr)
+    plr.Chatted:Connect(function(msg)
+        handleChatMessage(plr.DisplayName, msg)
+    end)
+end)
+
+-- ==============================================================================
+-- 12. ГОРЯЧИЕ КЛАВИШИ (HOTKEYS & INPUT HANDLERS)
+-- ==============================================================================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+
+    if input.KeyCode == Enum.KeyCode.Insert then
+        mainPanel.Visible = not mainPanel.Visible
+    end
+
+    if input.KeyCode == Enum.KeyCode.F4 then
+        flyToggleControl.set(not state.flyHack)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F5 then
+        noClipToggleControl.set(not state.noClip)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F6 then
+        noFallToggleControl.set(not state.noFallDmg)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F7 then
+        bringToggleControl.set(not state.bringMobs)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F8 then
+        autoFarmToggleControl.set(not state.autoFarm)
+    end
+end)
+
+-- ==============================================================================
+-- 13. ПЕРЕЗАПУСК ПРИ СПАВНЕ (CHARACTER ADDED EVENT)
+-- ==============================================================================
+-- 📚 [CRITICAL FIX V6 #2]: Полная очистка noclipOrigTransparency и ESP-данных при смене персонажа
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    for part, origT in pairs(noclipOrigTransparency) do
+        pcall(function()
+            if part and part.Parent then
+                part.Transparency = origT
+            end
+        end)
+    end
+    table.clear(noclipOrigTransparency)
+
+    for model, espData in pairs(espStorage) do
+        if not model or not model.Parent or model == LocalPlayer.Character then
+            if espData.highlight then pcall(function() espData.highlight:Destroy() end) end
+            if espData.billboard then pcall(function() espData.billboard:Destroy() end) end
+            espStorage[model] = nil
+        end
+    end
+
+    task.wait(0.5)
+    setupFallDamageProtection(newChar)
+    if state.speedHack then
+        local hum = newChar:WaitForChild("Humanoid", 5)
+        if hum then hum.WalkSpeed = state.speedValue end
+    end
+end)
+
+-- ==============================================================================
+-- 14. СТАРТОВОЕ ОПОВЕЩЕНИЕ
+-- ==============================================================================
+notify("ZAKZAR V6", "Чит-панель успешно загружена! Нажмите [Insert]", 4, colors.accent)
